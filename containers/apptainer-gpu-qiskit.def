@@ -31,7 +31,8 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
         qiskit-aer-gpu \
         pennylane \
         pennylane-lightning-gpu \
-        mpi4py
+        mpi4py \
+        cirq
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 
