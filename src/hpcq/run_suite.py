@@ -32,6 +32,9 @@ def run_suite(
     include_nccl: bool = False,
     include_energy: bool = False,
     include_cudaq: bool = False,
+    include_ai: bool = False,
+    include_cirq: bool = False,
+    include_qaoa: bool = False,
 ) -> list[BenchmarkResult]:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -53,6 +56,9 @@ def run_suite(
                 "include_nccl": include_nccl,
                 "include_energy": include_energy,
                 "include_cudaq": include_cudaq,
+                "include_ai": include_ai,
+                "include_cirq": include_cirq,
+                "include_qaoa": include_qaoa,
             },
         )
         _write_results([result], out)
@@ -73,6 +79,18 @@ def run_suite(
     )
     if include_vqe:
         results.append(run_numpy_vqe(steps=40, learning_rate=0.15))
+    if include_ai:
+        from hpcq.ai_train_bench import run_ai_train_benchmark
+
+        results.append(run_ai_train_benchmark(samples=2048, batch_size=128, epochs=2, device_choice=torch_device))
+    if include_cirq:
+        from hpcq.cirq_bench import run_cirq_ghz_benchmark
+
+        results.append(run_cirq_ghz_benchmark(n_qubits=min(12, max(4, qiskit_qubits)), repetitions=512))
+    if include_qaoa:
+        from hpcq.qaoa_bench import run_qaoa_grid_benchmark
+
+        results.append(run_qaoa_grid_benchmark(grid_size=32))
     if include_pennylane:
         from hpcq.pennylane_bench import run_pennylane_benchmark
 
@@ -113,6 +131,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-nccl", action="store_true")
     parser.add_argument("--include-energy", action="store_true")
     parser.add_argument("--include-cudaq", action="store_true")
+    parser.add_argument("--include-ai", action="store_true")
+    parser.add_argument("--include-cirq", action="store_true")
+    parser.add_argument("--include-qaoa", action="store_true")
     return parser.parse_args()
 
 
@@ -133,6 +154,9 @@ def main() -> int:
         include_nccl=args.include_nccl,
         include_energy=args.include_energy,
         include_cudaq=args.include_cudaq,
+        include_ai=args.include_ai,
+        include_cirq=args.include_cirq,
+        include_qaoa=args.include_qaoa,
     )
     for result in results:
         print(result.to_json())

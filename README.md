@@ -1,67 +1,59 @@
 # HPC GPU Quantum Container Reference Project
 
-This repository is a complete starter implementation for the thesis topic:
+This repository is an expanded implementation for the thesis topic:
 
 > Research of container solutions for HPC systems supporting GPU and Quantum (hybrid classical-quantum)
 
-The project focuses on a practical stack:
+The main implementation path is:
 
 ```text
 Slurm scheduler
-    -> Apptainer container
-        -> CUDA / PyTorch / Qiskit Aer GPU / PennyLane Lightning GPU / MPI
-            -> GPU and quantum benchmark scripts
+  -> Apptainer/Singularity container
+    -> CUDA/cuDNN + PyTorch + Qiskit/PennyLane/CUDA-Q + MPI/NCCL
+      -> benchmark JSON/JSONL + summary tables + SBOM/security outputs
 ```
 
-Docker is included only as a development/comparison path. The main HPC-native path is Apptainer.
+Docker/Podman and Kubernetes files are included as comparison paths. They are not the primary HPC runtime.
 
 ---
 
-## 1. Repository structure
+## 1. What is now covered
+
+| Thesis requirement | Implementation in this repo |
+|---|---|
+| Apptainer vs Docker/Podman architecture | `containers/`, `scripts/run_docker_gpu.sh`, `scripts/run_podman_gpu.sh`, docs |
+| GPU support | `hpcq.gpu_check`, `hpcq.torch_bench`, CUDA Docker/Apptainer images |
+| NCCL/multi-GPU | `hpcq.nccl_bench`, `slurm/run_nccl_torchrun.sbatch` |
+| MPI/high-performance networking | `hpcq.mpi_bench`, `slurm/run_mpi_bench.sbatch`, RDMA diagnostics |
+| Slurm integration | multiple `slurm/*.sbatch` scripts |
+| Kubernetes comparison | `k8s/gpu-quantum-job.yaml`, RDMA SR-IOV example |
+| Quantum/hybrid workflows | Qiskit, PennyLane, CUDA-Q optional, `hpcq.hybrid_vqe` |
+| Reproducibility | JSON/JSONL results, summary CSV/MD, lock example |
+| SBOM/security scanning | `scripts/generate_sbom.sh`, `scripts/security_scan.sh` |
+| MIG/MPS study | `scripts/mig_report.sh`, `scripts/start_mps.sh`, `slurm/run_mps_two_tasks.sbatch` |
+| Energy/Wh | `hpcq.energy` using `nvidia-smi` power samples |
+
+---
+
+## 2. Repository structure
 
 ```text
-hpc-gpu-quantum-container/
-├── containers/
-│   ├── apptainer-gpu-qiskit.def
-│   ├── apptainer-cudaq.def
-│   └── Dockerfile.gpu
-├── src/hpcq/
-│   ├── gpu_check.py
-│   ├── torch_bench.py
-│   ├── qiskit_bench.py
-│   ├── pennylane_bench.py
-│   ├── mpi_hello.py
-│   ├── run_suite.py
-│   └── result.py
-├── tests/
-├── slurm/
-├── benchmarks/
-├── docs/
-├── requirements-cpu.txt
-├── requirements-gpu-cu12.txt
-├── pyproject.toml
-└── Makefile
+containers/     Dockerfile and Apptainer definition files
+src/hpcq/       Python benchmark and diagnostics package
+tests/          Pytest suite that works without real GPU/Slurm
+slurm/          sbatch scripts for GPU, MPI, NCCL, CUDA-Q, MPS
+benchmarks/     Local benchmark launchers
+scripts/        Host checks, SBOM, security scan, Docker/Podman/MIG/MPS helpers
+k8s/            Kubernetes comparison manifests
+docs/           Architecture, gap analysis, Vietnamese report outline, MPI/RDMA notes
+results/        Default output folder
 ```
 
 ---
 
-## 2. What this code proves
+## 3. Local CPU validation
 
-This project demonstrates that a containerized HPC workflow can:
-
-1. Detect NVIDIA GPUs inside the container.
-2. Run a PyTorch CUDA benchmark.
-3. Run a Qiskit Aer quantum-circuit simulation.
-4. Run an optional PennyLane Lightning GPU benchmark.
-5. Run a simple MPI job inside a container.
-6. Submit the workflow through Slurm using `sbatch`.
-7. Export benchmark outputs as JSON/JSONL for later report writing.
-
----
-
-## 3. Local CPU test first
-
-Use this step even if you do not have GPU yet.
+Run this first, even without GPU:
 
 ```bash
 python -m venv .venv
@@ -71,174 +63,215 @@ python -m pip install -r requirements-cpu.txt
 python -m pip install -e .
 python -m pytest
 python -m hpcq.run_suite --dry-run --output-dir results/dry_run
+bash benchmarks/run_full_cpu.sh results/full_cpu
 ```
 
-Optional CPU benchmark:
+Expected result:
 
-```bash
-bash benchmarks/run_local_cpu.sh
+```text
+pytest passes
+results/full_cpu/*.json exists
+results/full_cpu/summary.csv exists
 ```
 
 ---
 
 ## 4. Build Apptainer image
 
-On an HPC login/build node with Apptainer:
-
 ```bash
 apptainer build hpcq-gpu.sif containers/apptainer-gpu-qiskit.def
 ```
 
-If the cluster does not allow local builds, use a build server or ask the admin for the recommended Apptainer build method.
+Optional CUDA-Q image:
+
+```bash
+apptainer build hpcq-cudaq.sif containers/apptainer-cudaq.def
+```
 
 ---
 
-## 5. Run Apptainer with GPU
+## 5. Run GPU suite with Apptainer
 
 ```bash
 apptainer exec --nv --bind "$PWD":/workspace --pwd /workspace hpcq-gpu.sif \
-  python3 -m hpcq.gpu_check --output results/gpu_check.json
+  python3 -m hpcq.run_suite \
+    --output-dir results/apptainer_gpu \
+    --device auto \
+    --matrix-size 2048 \
+    --qiskit-qubits 18 \
+    --qiskit-depth 6 \
+    --include-pennylane \
+    --include-energy
 ```
 
-Run the full suite:
+Summarize results:
 
 ```bash
-bash benchmarks/run_local_apptainer.sh hpcq-gpu.sif results/local_apptainer
-```
-
-Expected sign of success:
-
-```text
-"cuda_available": true
-"device": "cuda"
-"qiskit_aer": ok
+python -m hpcq.compare_results results/apptainer_gpu \
+  --csv results/apptainer_gpu/summary.csv \
+  --md results/apptainer_gpu/summary.md
 ```
 
 ---
 
-## 6. Run through Slurm
+## 6. Slurm jobs
 
-Edit the Slurm partition names in `slurm/run_gpu_qiskit.sbatch` if your cluster does not use `gpu`.
+GPU full suite:
 
 ```bash
-mkdir -p results
-sbatch slurm/run_gpu_qiskit.sbatch
+sbatch slurm/run_full_suite_gpu.sbatch
 ```
 
-Check output:
+MPI benchmark:
 
 ```bash
-ls results/
-cat results/hpcq_gpu_qiskit_<JOBID>.out
+sbatch slurm/run_mpi_bench.sbatch
 ```
 
-For MPI:
+NCCL/multi-GPU smoke test:
 
 ```bash
-sbatch slurm/run_mpi_apptainer.sbatch
+sbatch slurm/run_nccl_torchrun.sbatch
+```
+
+CUDA-Q optional test:
+
+```bash
+IMAGE=hpcq-cudaq.sif sbatch slurm/run_cudaq.sbatch
+```
+
+MPS study:
+
+```bash
+sbatch slurm/run_mps_two_tasks.sbatch
 ```
 
 ---
 
-## 7. Docker comparison path
+## 7. Docker/Podman comparison
 
-Build:
+Docker GPU path:
 
 ```bash
 docker build -t hpcq-gpu:dev -f containers/Dockerfile.gpu .
+bash scripts/run_docker_gpu.sh hpcq-gpu:dev results/docker_gpu
 ```
 
-Run:
+Podman GPU path requires NVIDIA CDI configuration on the host:
 
 ```bash
-docker run --rm --gpus all -v "$PWD":/workspace hpcq-gpu:dev \
-  python3 -m hpcq.run_suite --output-dir results/docker --device auto
-```
-
-Docker requires the NVIDIA Container Toolkit on the host for GPU access.
-
----
-
-## 8. Important compatibility notes
-
-1. `qiskit-aer-gpu` is intended for CUDA-capable environments. If GPU installation fails, use CPU mode with `qiskit-aer` for development.
-2. `pennylane-lightning-gpu` requires CUDA/cuQuantum-compatible libraries.
-3. The container uses CUDA 12.4.1. If your cluster driver is old, choose a CUDA image compatible with the host driver.
-4. In real HPC, the NVIDIA kernel driver is normally on the host. The container holds user-space libraries and Python packages.
-5. Do not assume your cluster partition is named `gpu`; check with `sinfo`.
-
----
-
-## 9. Minimal experimental plan for the thesis
-
-| Experiment | Command | Output |
-|---|---|---|
-| GPU visibility | `python -m hpcq.gpu_check` | `gpu_check.json` |
-| AI workload | `python -m hpcq.torch_bench` | `torch_matmul.json` |
-| Quantum workload | `python -m hpcq.qiskit_bench` | `qiskit_aer.json` |
-| Slurm integration | `sbatch slurm/run_gpu_qiskit.sbatch` | Slurm log + JSON |
-| MPI container | `sbatch slurm/run_mpi_apptainer.sbatch` | `mpi_hello.json` |
-| Docker comparison | `docker run --gpus all ...` | Docker benchmark JSON |
-
----
-
-## 10. Suggested report claim
-
-A safe claim for the thesis is:
-
-> This project implements and evaluates a reproducible Apptainer-based container workflow for GPU-accelerated AI and quantum simulation workloads on an HPC-style environment. The workflow integrates CUDA, Python scientific libraries, Qiskit/PennyLane quantum simulators, MPI, and Slurm batch execution. Docker is provided as a comparison/development path, while Apptainer is used as the main HPC-native runtime.
-
----
-
-## 11. Troubleshooting
-
-### `cuda_available` is false
-
-Check:
-
-```bash
-nvidia-smi
-apptainer exec --nv hpcq-gpu.sif nvidia-smi
-```
-
-If host `nvidia-smi` fails, the issue is host driver or GPU allocation, not the container.
-
-### Slurm says no GPU available
-
-Check:
-
-```bash
-sinfo
-scontrol show nodes
-```
-
-Your cluster may use a different partition or GRES name.
-
-### Qiskit GPU fails but CPU works
-
-Run:
-
-```bash
-python3 -m hpcq.qiskit_bench --device cpu --n-qubits 8 --depth 2
-```
-
-Then debug the CUDA/Qiskit package compatibility separately.
-
-### Apptainer cannot find your code
-
-Use the bind mount:
-
-```bash
-apptainer exec --bind "$PWD":/workspace --pwd /workspace hpcq-gpu.sif python3 -m hpcq.run_suite --dry-run
+bash scripts/run_podman_gpu.sh hpcq-gpu:dev results/podman_gpu
 ```
 
 ---
 
-## 12. References to read before writing the report
+## 8. Host diagnostics
 
-- Apptainer User Guide: GPU support and definition files.
-- Slurm documentation: containers, `sbatch`, and GPU/GRES scheduling.
-- NVIDIA Container Toolkit documentation.
-- Qiskit Aer documentation for GPU/MPI simulation.
-- PennyLane Lightning GPU documentation.
-- NVIDIA CUDA-Q documentation.
+Before writing the report, capture host information:
+
+```bash
+bash scripts/check_host_hpc.sh | tee results/host_check.txt
+python -m hpcq.sysinfo --output results/system_report.json
+bash scripts/mig_report.sh results/mig_report.txt
+```
+
+---
+
+## 9. SBOM and security scan
+
+```bash
+bash scripts/generate_sbom.sh . results/sbom
+bash scripts/security_scan.sh . results/security
+```
+
+The scripts use `syft`, `trivy`, or `grype` if installed. Otherwise they produce clear fallback files so the report can state what was or was not executed.
+
+---
+
+## 10. Safe report claim
+
+A safe claim is:
+
+> The project implements an Apptainer-centered HPC container workflow for GPU-accelerated AI, MPI/NCCL communication, and hybrid quantum simulation workloads. It also provides Docker/Podman and Kubernetes comparison paths, Slurm job scripts, benchmark outputs, energy sampling, SBOM/security scan hooks, and documentation for MIG/MPS/RDMA limitations.
+
+Do not claim real InfiniBand, multi-node NCCL, MIG partitioning, or cloud QPU execution unless you actually run the corresponding scripts on hardware that supports them.
+
+---
+
+## 11. Main commands for grading/demo
+
+```bash
+make test
+make run-full-cpu
+make sbom
+make scan
+make summarize
+```
+
+On a GPU HPC node:
+
+```bash
+make build
+make run-full-apptainer
+sbatch slurm/run_full_suite_gpu.sbatch
+```
+
+---
+
+## 12. Added Priority-1 and Priority-2 completion package
+
+This version adds the missing practical components needed to make the project closer to the grading target:
+
+```text
+Container runs GPU
+Container runs through Slurm
+Container supports AI/MPI/Quantum workloads
+Benchmark results and documentation are clear
+```
+
+### Priority 1 files
+
+| Priority item | Added implementation |
+|---|---|
+| `collect_gpu_evidence.sh` | `scripts/collect_gpu_evidence.sh` |
+| Real Slurm logs | metadata-rich `slurm/*.sbatch` scripts + `scripts/collect_slurm_evidence.sh` |
+| Benchmark comparison CSV | `src/hpcq/benchmark_matrix.py`, `benchmarks/run_comparison_matrix.sh` |
+| AI mini training benchmark | `src/hpcq/ai_train_bench.py`, `slurm/run_ai_train_gpu.sbatch` |
+| MPI latency/bandwidth benchmark | improved `src/hpcq/mpi_bench.py`, `slurm/run_mpi_bench.sbatch`, `scripts/collect_mpi_evidence.sh` |
+| Qiskit/Cirq/PennyLane/CUDA-Q suite | `src/hpcq/quantum_suite.py`, `src/hpcq/cirq_bench.py`, `src/hpcq/qaoa_bench.py`, `slurm/run_quantum_suite.sbatch` |
+| Vietnamese final report draft | `docs/final_report_vi.md` |
+
+### Priority 2 files
+
+| Priority item | Added implementation |
+|---|---|
+| NCCL all-reduce benchmark | `src/hpcq/nccl_bench.py`, `slurm/run_nccl_torchrun.sbatch` |
+| Energy/Wh benchmark | `src/hpcq/energy.py`, `slurm/run_energy_gpu.sbatch` |
+| SBOM + Trivy/Grype output | `scripts/collect_security_evidence.sh`, `scripts/generate_sbom.sh`, `scripts/security_scan.sh` |
+| MIG/MPS logs | `scripts/mig_report.sh`, `scripts/start_mps.sh`, `scripts/stop_mps.sh`, `slurm/run_mps_two_tasks.sbatch` |
+| Kubernetes GPU job comparison | `k8s/gpu-comparison-job.yaml`, `k8s/nccl-multigpu-job.yaml` |
+
+### Recommended proof-collection command sequence
+
+```bash
+# local smoke validation
+make validate
+
+# on GPU HPC node
+make build
+bash scripts/collect_gpu_evidence.sh results/evidence/gpu hpcq-gpu.sif
+
+# Slurm jobs
+sbatch slurm/run_full_suite_gpu.sbatch
+sbatch slurm/run_ai_train_gpu.sbatch
+sbatch slurm/run_mpi_bench.sbatch
+sbatch slurm/run_nccl_torchrun.sbatch
+sbatch slurm/run_quantum_suite.sbatch
+sbatch slurm/run_energy_gpu.sbatch
+
+# comparison and documentation tables
+bash benchmarks/run_comparison_matrix.sh results/comparison
+bash scripts/collect_security_evidence.sh results/security .
+```
+
+See `docs/acceptance_checklist.md` for the exact evidence files to attach to the report.
